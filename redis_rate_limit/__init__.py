@@ -3,9 +3,9 @@
 
 import functools
 from hashlib import sha1
-from redis.exceptions import NoScriptError
-from redis import Redis, ConnectionPool
 
+from redis import ConnectionPool, Redis
+from redis.exceptions import NoScriptError
 
 # Adapted from http://redis.io/commands/incr#pattern-rate-limiter-2
 INCREMENT_SCRIPT = b"""
@@ -20,6 +20,8 @@ INCREMENT_SCRIPT_HASH = sha1(INCREMENT_SCRIPT).hexdigest()
 
 REDIS_POOL = ConnectionPool(host='127.0.0.1', port=6379, db=0)
 
+KEY_PREFIX = 'rate_limit:'
+
 class TooManyRequests(Exception):
     """
     Occurs when the maximum number of requests is reached for a given resource
@@ -33,7 +35,15 @@ class RateLimit(object):
     This class offers an abstraction of a Rate Limit algorithm implemented on
     top of Redis >= 2.6.0.
     """
-    def __init__(self, resource, client, max_requests, expire=None, redis_pool=REDIS_POOL):
+    def __init__(
+        self,
+        resource,
+        client,
+        max_requests,
+        expire=None,
+        redis_pool=REDIS_POOL,
+        key_prefix=KEY_PREFIX,
+    ):
         """
         Class initialization method checks if the Rate Limit algorithm is
         actually supported by the installed Redis version and sets some
@@ -42,14 +52,16 @@ class RateLimit(object):
         If Rate Limit is not supported, it raises an Exception.
 
         :param resource: resource identifier string (i.e. ‘user_pictures’)
-        :param client: client identifier string (i.e. ‘192.168.0.10’)
+        :param client: client/user/id identifier string (i.e. ‘192.168.0.10’)
         :param max_requests: integer (i.e. ‘10’)
         :param expire: seconds to wait before resetting counters (i.e. ‘60’)
         :param redis_pool: instance of redis.ConnectionPool.
                Default: ConnectionPool(host='127.0.0.1', port=6379, db=0)
+        :param key_prefix: prefix for Redis keys, default is 'rate_limit:'
         """
         self._redis = Redis(connection_pool=redis_pool)
-        self._rate_limit_key = "rate_limit:{0}_{1}".format(resource, client)
+        self._key_prefix = key_prefix
+        self._rate_limit_key = "{0}{1}_{2}".format(self._key_prefix, resource, client)
         self._max_requests = max_requests
         self._expire = expire or 1
 
@@ -140,15 +152,22 @@ class RateLimit(object):
 
     def _reset(self):
         """
-        Deletes all keys that start with ‘rate_limit:’.
+        Deletes all keys that start with ‘self._key_prefix’.
         """
-        matching_keys = self._redis.scan_iter(match='{0}*'.format('rate_limit:*'))
+        matching_keys = self._redis.scan_iter(match='{0}*'.format(self._key_prefix))
         for rate_limit_key in matching_keys:
             self._redis.delete(rate_limit_key)
 
 
 class RateLimiter(object):
-    def __init__(self, resource, max_requests, expire=None, redis_pool=REDIS_POOL):
+    def __init__(
+        self,
+        resource,
+        max_requests,
+        expire=None,
+        redis_pool=REDIS_POOL,
+        key_prefix=KEY_PREFIX,
+    ):
         """
         Rate limit factory. Checks if RateLimit is supported when limit is called.
         :param resource: resource identifier string (i.e. ‘user_pictures’)
@@ -156,11 +175,13 @@ class RateLimiter(object):
         :param expire: seconds to wait before resetting counters (i.e. ‘60’)
         :param redis_pool: instance of redis.ConnectionPool.
                Default: ConnectionPool(host='127.0.0.1', port=6379, db=0)
+        :param key_prefix: prefix for Redis keys, default is 'rate_limit:'
        """
         self.resource = resource
         self.max_requests = max_requests
         self.expire = expire
         self.redis_pool = redis_pool
+        self.key_prefix = key_prefix
 
     def limit(self, client):
         """
@@ -172,4 +193,5 @@ class RateLimiter(object):
             max_requests=self.max_requests,
             expire=self.expire,
             redis_pool=self.redis_pool,
+            key_prefix=self.key_prefix,
         )
